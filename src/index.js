@@ -1,8 +1,10 @@
 const { Boom } = require("@hapi/boom");
 const pino = require("pino");
 const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require("@whiskeysockets/baileys");
+const fs = require("fs");
+const path = require("path");
 const config = require("../config");
-const database = require("./database");
+const { dbHelper } = require("./database");
 
 const logger = pino();
 
@@ -66,6 +68,38 @@ async function startBot() {
     // Handle credentials update
     sock.ev.on("creds.update", saveCreds);
 
+    // Helper function untuk send media
+    const sendMedia = async (jid, mediaPath, mediaType, caption = "") => {
+      try {
+        const filePath = path.join(__dirname, "../assets", mediaPath);
+        
+        if (!fs.existsSync(filePath)) {
+          console.log(`⚠️ File tidak ditemukan: ${filePath}`);
+          await sock.sendMessage(jid, { text: `❌ Media ${mediaPath} tidak ditemukan! Silakan letakkan file di folder assets/` });
+          return;
+        }
+
+        const mediaBuffer = fs.readFileSync(filePath);
+        const mimeTypes = {
+          image: "image/jpeg",
+          video: "video/mp4",
+          audio: "audio/mpeg",
+        };
+
+        const message = {
+          [mediaType]: mediaBuffer,
+          mimetype: mimeTypes[mediaType] || "application/octet-stream",
+          caption: caption || undefined,
+        };
+
+        await sock.sendMessage(jid, message);
+        console.log(`✅ ${mediaType.toUpperCase()} terkirim: ${mediaPath}`);
+      } catch (error) {
+        console.error(`❌ Error sending ${mediaType}:`, error);
+        await sock.sendMessage(jid, { text: `❌ Terjadi error saat mengirim media!` });
+      }
+    };
+
     // Handle incoming messages
     sock.ev.on("messages.upsert", async (m) => {
       try {
@@ -84,6 +118,15 @@ async function startBot() {
 
         console.log(`📨 Pesan dari ${from}: ${messageBody}`);
 
+        // Log message to database
+        try {
+          const phoneNumber = from.split("@")[0];
+          await dbHelper.addUser(phoneNumber);
+          await dbHelper.logMessage(phoneNumber, messageBody);
+        } catch (dbError) {
+          console.log("⚠️ Tidak bisa log message ke database");
+        }
+
         // Example command handler
         if (messageBody.startsWith(config.botPrefix)) {
           const command = messageBody.slice(config.botPrefix.length).trim().split(" ")[0].toLowerCase();
@@ -94,31 +137,102 @@ async function startBot() {
           // Handle basic commands
           switch (command) {
             case "ping":
-              await sock.sendMessage(from, { text: "🏓 Pong!" });
+              await sock.sendMessage(from, { text: "🏓 Pong! Bot sedang aktif ✅" });
               break;
 
             case "menu":
-              const menuText = `
-╔═══════════════════════╗
-║  🤖 ${config.botName}  
-╠═══════════════════════╣
+              const menuCaption = `
+╔═══════════════════════════════╗
+║      🤖 ${config.botName}      
+╠═══════════════════════════════╣
 ║
-║ *MENU COMMANDS*
-║ ${config.botPrefix}ping - Cek bot
-║ ${config.botPrefix}menu - Tampilkan menu
-║ ${config.botPrefix}owner - Info owner
+║ *📋 MENU COMMANDS*
 ║
-╚═══════════════════════╝
+║ ${config.botPrefix}ping - Cek status bot
+║ ${config.botPrefix}menu - Tampilkan menu ini
+║ ${config.botPrefix}owner - Info owner bot
+║ ${config.botPrefix}help - Bantuan lengkap
+║ ${config.botPrefix}demo - Demo semua media
+║
+║ *🎬 MEDIA*
+║ Gambar, Video, Audio tersedia!
+║
+╚═══════════════════════════════╝
               `;
-              await sock.sendMessage(from, { text: menuText });
+
+              // Kirim menu dengan gambar
+              await sendMedia(from, "menu/menu_image.jpg", "image", menuCaption);
+              
               break;
 
             case "owner":
-              await sock.sendMessage(from, { text: `👤 Owner: ${config.ownerNumber}` });
+              const ownerText = `
+👤 *INFO OWNER*
+
+Nomor: wa.me/${config.ownerNumber}
+Nama: Owner ${config.botName}
+Status: Online ✅
+
+Hubungi untuk info lebih lanjut!
+              `;
+              
+              // Kirim dengan foto owner jika ada
+              await sendMedia(from, "owner/owner_image.jpg", "image", ownerText);
+              
+              break;
+
+            case "demo":
+              await sock.sendMessage(from, { text: "🎬 *Demo Media Dimulai...*\n\n📹 Mengirim Video Demo..." });
+              await new Promise(r => setTimeout(r, 500));
+              await sendMedia(from, "demo/demo_video.mp4", "video", "📹 Video Demo Fitur Bot Lucient MD");
+              
+              await new Promise(r => setTimeout(r, 1000));
+              await sock.sendMessage(from, { text: "🎵 Mengirim Audio Demo..." });
+              await new Promise(r => setTimeout(r, 500));
+              await sendMedia(from, "demo/demo_audio.mp3", "audio");
+              
+              await new Promise(r => setTimeout(r, 1000));
+              await sock.sendMessage(from, { text: "📸 Mengirim Foto Demo..." });
+              await new Promise(r => setTimeout(r, 500));
+              await sendMedia(from, "demo/demo_image.jpg", "image", "📸 Foto Demo Bot");
+              
+              await new Promise(r => setTimeout(r, 1000));
+              await sock.sendMessage(from, { text: "✅ Demo selesai!" });
+              
+              break;
+
+            case "help":
+              const helpText = `
+╔═══════════════════════════════╗
+║        📚 BANTUAN LENGKAP
+╠═══════════════════════════════╣
+║
+║ 🎯 *BASIC COMMANDS*
+║ ${config.botPrefix}ping - Cek status bot
+║ ${config.botPrefix}menu - Tampilkan menu
+║ ${config.botPrefix}owner - Info owner
+║ ${config.botPrefix}help - Bantuan ini
+║ ${config.botPrefix}demo - Demo media
+║
+║ 📝 *CARA MENGGUNAKAN*
+║ Ketik prefix (${config.botPrefix}) diikuti
+║ dengan nama command
+║
+║ Contoh: ${config.botPrefix}ping
+║
+║ 🎬 *MEDIA SUPPORT*
+║ Bot bisa mengirim:
+║ • 📸 Gambar (JPG, PNG)
+║ • 📹 Video (MP4)
+║ • 🎵 Audio (MP3)
+║
+╚═══════════════════════════════╝
+              `;
+              await sock.sendMessage(from, { text: helpText });
               break;
 
             default:
-              await sock.sendMessage(from, { text: `❌ Command \`${command}\` tidak ditemukan!\nKetik ${config.botPrefix}menu untuk melihat daftar command.` });
+              await sock.sendMessage(from, { text: `❌ Command \`${command}\` tidak ditemukan!\n\nKetik ${config.botPrefix}menu untuk melihat daftar command lengkap.` });
           }
         }
       } catch (error) {
